@@ -1,15 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Change, Opened, Snapshot, View } from '../types'
+import type { Change, EditorMessage, EditorProps, FileView, Opened, Snapshot, View } from '../types'
+import { INK, baseName, headingAt, highlight, clip, isMarkdown, markLines } from './paint'
 
 const PANE = 'worktree-diff'
 const EDITING_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'])
 const MAX_DIFF = 90000
-// Past this many lines the editor shows the file read-only and points to "Abrir fuera".
-const MAX_EDIT_LINES = 800
-// Chips in the band above the prompt; the rest are counted.
-const MAX_CHIPS = 12
+// Past this many characters the editor is not drawn (its props are bounded): "↗"
+// edits the file outside.
+const MAX_EDIT_CHARS = 80000
+// Rows in the changed-files list; the rest are counted.
+const MAX_LISTED = 400
+// The quiet time after typing before an autosave writes the file.
+const AUTOSAVE_MS = 800
+// The pane's rows above the code: breadcrumb, status, a blank.
+const HEADER_ROWS = 3
 
 const shown = atom({ plugin: 'worktree-diff', key: 'shown' } as const, null as View | null)
 const snapshot = atom({ plugin: 'worktree-diff', key: 'snapshot' } as const, {
@@ -21,12 +27,18 @@ const snapshot = atom({ plugin: 'worktree-diff', key: 'snapshot' } as const, {
 const opened = atom({ plugin: 'worktree-diff', key: 'opened' } as const, null as Opened | null)
 const reveal = atom({ plugin: 'worktree-diff', key: 'reveal' } as const, false)
 const notice = atom({ plugin: 'worktree-diff', key: 'notice' } as const, '')
-// The line being edited in the editor, by index; null edits none.
-const line = atom({ plugin: 'worktree-diff', key: 'line' } as const, null as number | null)
+// The first line the code view shows: the pane scrolls its own window of lines.
+const top = atom({ plugin: 'worktree-diff', key: 'top' } as const, 0)
+// The wheel's travel over the editor, summed; the editor scrolls by its changes.
+const wheel = atom({ plugin: 'worktree-diff', key: 'wheel' } as const, 0)
+// Counts the reads of the open file, so the editor tells a new text from its own.
+const version = atom({ plugin: 'worktree-diff', key: 'version' } as const, 0)
+// Typed in the editor and not yet written.
+const dirty = atom({ plugin: 'worktree-diff', key: 'dirty' } as const, false)
+const autosave = atom({ plugin: 'worktree-diff', key: 'autosave' } as const, true)
 
 const ENV_LINE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(.*)$/
 const isEnvFile = (name: string) => /^\.env(\..+)?$/.test(name) || name === '.dev.vars'
-const baseName = (path: string) => path.split('/').pop() ?? path
 
 // git status --porcelain=v1 -z: "XY path\0", a rename followed by "orig\0".
 const parseStatus = (raw: string): Change[] => {
@@ -78,8 +90,9 @@ const describe = (code: string) =>
           ? 'agregado'
           : 'modificado'
 
-const tone = (code: string) =>
-  code === '??' || code.includes('A') ? 'success' : code.includes('D') ? 'error' : 'warning'
+// The status letter Cursor's Source Control list shows beside a file.
+const letter = (code: string) =>
+  code === '??' ? 'U' : code === 'env' ? 'E' : code.includes('D') ? 'D' : code.includes('R') ? 'R' : code.includes('A') ? 'A' : 'M'
 
 const git = ($: EngineInterface, root: string, args: string[]) =>
   $.process.run(['git', ...args], { cwd: root, timeoutMs: 15000 })
@@ -98,6 +111,7 @@ const loadFile = async ($: EngineInterface, path: string, withDiff: boolean) => 
     diff = capDiff(ran?.stdout ?? '')
   }
   await update($, opened, () => ({ path, text: typeof text === 'string' ? text : '', diff }))
+  await update($, version, count => count + 1)
 }
 
 const refresh = async ($: EngineInterface) => {
@@ -150,38 +164,62 @@ const refresh = async ($: EngineInterface) => {
   }))
   // The open file follows what Claude just changed in it.
   const current = await read($, shown)
-  if (current) await loadFile($, current.path, current.kind === 'diff')
+  if (current && current.kind !== 'files') await loadFile($, current.path, current.kind !== 'env')
 }
 
-const go = async ($: EngineInterface, next: View) => {
+const go = async ($: EngineInterface, next: FileView) => {
+  await flush($)
+  const before = await read($, shown)
   await update($, notice, () => '')
-  await update($, line, () => null)
-  await loadFile($, next.path, next.kind === 'diff')
+  await loadFile($, next.path, next.kind !== 'env')
+  if (before?.kind === 'files' || before?.path !== next.path) await update($, top, () => 0)
   await update($, shown, () => next)
 }
 
-// A chip in the band, or /worktree: shows the file in the pane, opening it.
+// A chip in the band, a row of the list, or /worktree: shows the file in the pane,
+// opening it. A file opens on its colored source; one with no text on its diff.
 const openFile = async ($: EngineInterface, path: string) => {
-  const isEnv = isEnvFile(baseName(path)) && !(await read($, snapshot)).changes.some(one => one.path === path)
-  await go($, { kind: isEnv ? 'env' : 'diff', path })
+  const change = (await read($, snapshot)).changes.find(one => one.path === path)
+  const isEnv = isEnvFile(baseName(path)) && !change
+  const isTextless = change !== undefined && (change.code.includes('D') || change.isBinary === true)
+  await go($, { kind: isEnv ? 'env' : isTextless ? 'diff' : 'code', path })
   await $.ui.open({ id: PANE, title: baseName(path) })
+}
+
+const openList = async ($: EngineInterface) => {
+  await flush($)
+  await update($, notice, () => '')
+  await update($, shown, () => ({ kind: 'files' }))
+  await $.ui.open({ id: PANE, title: 'Cambios' })
 }
 
 const save = async ($: EngineInterface, path: string, text: string) => {
   const { root } = await read($, snapshot)
   await $.fs.write(`${root}/${path}`, text)
   await update($, opened, file => (file && file.path === path ? { ...file, text } : file))
-  await update($, notice, () => `Guardado ${path}`)
+  await update($, notice, () => `Guardado ${baseName(path)}`)
   void refresh($)
 }
 
-const editLines = async ($: EngineInterface, path: string, edit: (lines: string[]) => void) => {
-  const file = await read($, opened)
-  if (!file || file.path !== path) return
-  const lines = file.text.split('\n')
-  edit(lines)
-  await update($, line, () => null)
-  await save($, path, lines.join('\n'))
+// What the editor holds that is not written yet, and the autosave waiting on it.
+let pending: Omit<EditorMessage, 'type'> | undefined
+let timer: { cancel: () => void } | undefined
+
+const flush = async ($: EngineInterface) => {
+  timer?.cancel()
+  timer = undefined
+  const held = pending
+  pending = undefined
+  if (held === undefined) return
+  await update($, dirty, () => false)
+  await save($, held.path, held.text)
+}
+
+const typed = async ($: EngineInterface, path: string, text: string) => {
+  pending = { path, text }
+  if (!(await read($, dirty))) await update($, dirty, () => true)
+  timer?.cancel()
+  timer = (await read($, autosave)) ? $.clock.after(AUTOSAVE_MS, () => void flush($)) : undefined
 }
 
 const setEnv = async ($: EngineInterface, path: string, key: string, value: string) => {
@@ -218,6 +256,31 @@ const openExternal = async ($: EngineInterface, editor: string, path: string) =>
   )
 }
 
+const splitLines = (text: string) => {
+  const lines = text.split('\n')
+  // A final newline is no line of its own.
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+const listed = (snap: Snapshot): Change[] => [
+  ...snap.changes,
+  ...snap.envFiles
+    .filter(name => !snap.changes.some(one => one.path === name))
+    .map(name => ({ path: name, code: 'env' }) as Change),
+]
+
+const letterColor = (mark: string) =>
+  mark === 'U' || mark === 'A'
+    ? INK.added
+    : mark === 'D'
+      ? INK.deleted
+      : mark === 'R'
+        ? INK.modified
+        : mark === 'E'
+          ? INK.dim
+          : INK.strong
+
 export const register: Register = (on, options) => {
   const editor = String(options.editor ?? 'open').trim() || 'open'
   const background = String(options.background ?? '#0a0a0a').trim()
@@ -226,7 +289,7 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     await $.command.register({
       name: 'worktree',
-      description: 'Abre el primer archivo cambiado del worktree en un panel',
+      description: 'Abre la lista de archivos cambiados del worktree en un panel',
     })
     void refresh($)
 
@@ -235,12 +298,13 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'worktree' }, async $ => {
     await refresh($)
-    const { changes, envFiles, error } = await read($, snapshot)
-    const first = changes[0]?.path ?? envFiles[0]
-    if (first === undefined) return { text: error ?? 'No hay archivos cambiados en el worktree.' }
-    await openFile($, first)
+    const snap = await read($, snapshot)
+    const all = listed(snap)
+    if (all.length === 0) return { text: snap.error ?? 'No hay archivos cambiados en el worktree.' }
+    if (all.length === 1) await openFile($, all[0]!.path)
+    else await openList($)
 
-    return { text: `Abierto ${first}.` }
+    return { text: all.length === 1 ? `Abierto ${all[0]!.path}.` : `${all.length} archivos cambiados.` }
   })
 
   on('tool.call', async ($, e, next) => {
@@ -250,63 +314,112 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // Above the prompt: one chip per changed file, as image-preview lists a draft's images.
+  // Above the prompt, always one row: a summary that opens the list, then as many
+  // files as fit, the rest counted.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const snap = await read($, snapshot)
-    const listed = [
-      ...snap.changes,
-      ...snap.envFiles
-        .filter(name => !snap.changes.some(one => one.path === name))
-        .map(name => ({ path: name, code: 'env' }) as Change),
-    ]
-    if (listed.length === 0) return next(e)
+    const all = listed(snap)
+    if (all.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const current = await read($, shown)
     const below = await next(e)
-    const room = Math.max(12, Math.floor(e.props.bodyColumns / 3))
-    const label = (path: string) => (path.length <= room ? path : `…/${baseName(path)}`)
+    const added = all.reduce((sum, one) => sum + (one.added ?? 0), 0)
+    const removed = all.reduce((sum, one) => sum + (one.removed ?? 0), 0)
+    const summary = `⎇ ${all.length} ${all.length === 1 ? 'cambio' : 'cambios'}`
+    const stats = (one: { added?: number; removed?: number }) =>
+      `${one.added ? ` +${one.added}` : ''}${one.removed ? ` -${one.removed}` : ''}`
+    // What fits: each chip is "[name]" and its counts, a column between chips.
+    let room = e.props.bodyColumns - summary.length - stats({ added, removed }).length - 12
+    const chips: Change[] = []
+    for (const one of all) {
+      const width = baseName(one.path).length + 2 + stats(one).length + 1
+      if (width > room) break
+      chips.push(one)
+      room -= width
+    }
+    const rest = all.length - chips.length
 
     return (
       <Box flexDirection="column">
         {below}
-        <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          {listed.slice(0, MAX_CHIPS).map(change => (
-            <Box key={`chip-box:${change.path}`}>
-              <Button key={`chip:${change.path}`} plain onPress={() => openFile($, change.path)}>
+        <Box flexDirection="row" columnGap={1}>
+          <Box key="summary-box">
+            <Button key="all-files" plain onPress={() => openList($)}>
+              <Text color={INK.text} inverse={current?.kind === 'files'} hover={{ inverse: true }}>
+                {summary}
+              </Text>
+              {added > 0 && <Text color={INK.added}> +{added}</Text>}
+              {removed > 0 && <Text color={INK.deleted}> -{removed}</Text>}
+            </Button>
+          </Box>
+          <Text color={INK.dim}>│</Text>
+          {chips.map(one => (
+            <Box key={`chip-box:${one.path}`}>
+              <Button key={`chip:${one.path}`} plain onPress={() => openFile($, one.path)}>
                 <Text
                   color="claude"
-                  inverse={current?.path === change.path}
+                  inverse={current !== null && current.kind !== 'files' && current.path === one.path}
                   hover={{ inverse: true }}
                 >
-                  [{label(change.path)}]
+                  [{baseName(one.path)}]
                 </Text>
-                {change.added !== undefined && change.added > 0 && (
-                  <Text color="success"> +{change.added}</Text>
-                )}
-                {change.removed !== undefined && change.removed > 0 && (
-                  <Text color="error"> -{change.removed}</Text>
-                )}
+                {one.added !== undefined && one.added > 0 && <Text color={INK.added}> +{one.added}</Text>}
+                {one.removed !== undefined && one.removed > 0 && <Text color={INK.deleted}> -{one.removed}</Text>}
               </Button>
             </Box>
           ))}
-          {listed.length > MAX_CHIPS && <Text dimColor>+{listed.length - MAX_CHIPS} más</Text>}
-          <Text dimColor>click para ver o editar</Text>
+          {rest > 0 && <Button key="more-files" label={`+${rest} más`} plain dimColor onPress={() => openList($)} />}
         </Box>
       </Box>
     )
   })
 
+  // The code view draws only the lines in view, so the pane moves its own window:
+  // a file of any length stays a few hundred elements.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const current = await read($, shown)
+    const file = await read($, opened)
+    if (!file || current?.kind === 'files' || current?.path !== file.path) return next(e)
+    if (current.kind === 'edit') {
+      await update($, wheel, at => at + e.by)
+      return {}
+    }
+    if (current.kind !== 'code') return next(e)
+    const room = Math.max(1, e.bodyRows - HEADER_ROWS)
+    const last = Math.max(0, splitLines(file.text).length - room)
+    await update($, top, at => Math.min(last, Math.max(0, at + e.by)))
+
+    return {}
+  })
+
+  // The editor posts what is typed: saved after a pause under autosave, at once
+  // with ctrl+s.
+  on('ui.message', { element: 'editor' }, async ($, e) => {
+    const data = e.data as EditorMessage
+    if (data.type === 'save') {
+      pending = { path: data.path, text: data.text }
+      await flush($)
+    } else {
+      await typed($, data.path, data.text)
+    }
+
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
-    const { Box, Text, Button, Code } = table
-    // The mobile app draws no text field: editing there goes through "Abrir fuera".
+    const { Box, Text, Button, Code, Markdown } = table
+    // The mobile app draws no text field: editing there goes through "↗".
     const Input = 'Input' in table ? table.Input : undefined
+    // Only the terminal runs a surface module, which the editor is.
+    const Client = 'Client' in table ? table.Client : undefined
     const snap = await read($, snapshot)
     const current = await read($, shown)
     const file = await read($, opened)
     const message = await read($, notice)
     const isDock = e.props.placement === 'dock'
+    const bodyRows = e.props.scroll.bodyRows
 
     // A darker body than the terminal's; docked, it fills the pane's height.
     const frame = (children: RenderChildren) => (
@@ -314,51 +427,143 @@ export const register: Register = (on, options) => {
         flexDirection="column"
         paddingX={1}
         backgroundColor={background === '' ? undefined : background}
-        minHeight={isDock ? e.props.scroll.bodyRows : undefined}
+        minHeight={isDock ? bodyRows : undefined}
       >
         {children}
       </Box>
     )
+    const close = <Button key="close" label=" ✕ " plain dimColor role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
 
-    if (!current || !file || file.path !== current.path) {
+    // Like Cursor's Source Control: one row a file, its name, its folder dim, its
+    // counts and status letter at the right.
+    if (current?.kind === 'files') {
+      const all = listed(snap)
+      const added = all.reduce((sum, one) => sum + (one.added ?? 0), 0)
+      const removed = all.reduce((sum, one) => sum + (one.removed ?? 0), 0)
+      const sorted = [...all].sort((a, b) => a.path.localeCompare(b.path))
       return frame(
-        <Text color="subtle">Elige un archivo cambiado en la fila de arriba del prompt.</Text>,
+        <>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text wrap="truncate-end">
+              <Text color={INK.text} bold>
+                Cambios
+              </Text>
+              <Text color={INK.dim}>{`  ${all.length} ${all.length === 1 ? 'archivo' : 'archivos'}`}</Text>
+              {added > 0 && <Text color={INK.added}> +{added}</Text>}
+              {removed > 0 && <Text color={INK.deleted}> −{removed}</Text>}
+            </Text>
+            {close}
+          </Box>
+          <Box marginBottom={1}>
+            <Text color={INK.dim} wrap="truncate-end">
+              ⎇ {snap.branch || 'worktree'}
+            </Text>
+          </Box>
+          {all.length === 0 && <Text color={INK.dim}>{snap.error ?? 'No hay archivos cambiados.'}</Text>}
+          {sorted.slice(0, MAX_LISTED).map(one => {
+            const mark = letter(one.code)
+            const folder = one.path.includes('/') ? one.path.slice(0, one.path.lastIndexOf('/')) : ''
+            return (
+              <Box key={`file-row:${one.path}`} flexDirection="row" justifyContent="space-between" columnGap={2} hover={{ backgroundColor: INK.lineHover }}>
+                <Box flexShrink={1}>
+                  <Button key={`file:${one.path}`} plain onPress={() => openFile($, one.path)}>
+                    <Text wrap="truncate-end">
+                      <Text color={INK.text}>{baseName(one.path)}</Text>
+                      {folder !== '' && <Text color={INK.dim}>{`  ${folder}`}</Text>}
+                    </Text>
+                  </Button>
+                </Box>
+                <Box flexShrink={0}>
+                  <Text>
+                    {one.added !== undefined && one.added > 0 && <Text color={INK.added}>+{one.added} </Text>}
+                    {one.removed !== undefined && one.removed > 0 && <Text color={INK.deleted}>−{one.removed} </Text>}
+                    <Text color={letterColor(mark)}>{mark}</Text>
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
+          {sorted.length > MAX_LISTED && <Text color={INK.dim}>y {sorted.length - MAX_LISTED} más</Text>}
+        </>,
       )
     }
 
-    const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~')
+    if (!current || !file || file.path !== current.path) {
+      return frame(<Text color={INK.dim}>Elige un archivo cambiado en la fila de arriba del prompt.</Text>)
+    }
+
     const change = snap.changes.find(one => one.path === file.path)
-    const tab = (kind: View['kind'], text: string) =>
+    const lines = splitLines(file.text)
+    const first = Math.min(await read($, top), Math.max(0, lines.length - 1))
+    const isEnv = isEnvFile(baseName(file.path))
+    const isDirty = await read($, dirty)
+    const isAutosave = await read($, autosave)
+
+    // Like Cursor's editor: a breadcrumb on the left, the views on the right.
+    const segments = file.path.split('/')
+    const heading = isMarkdown(file.path) ? headingAt(lines, first) : undefined
+    const views: [FileView['kind'], string][] = [
+      ...(isMarkdown(file.path)
+        ? ([
+            ['preview', 'Preview'],
+            ['code', 'Markdown'],
+          ] as [FileView['kind'], string][])
+        : ([['code', 'Código']] as [FileView['kind'], string][])),
+      ['edit', 'Editar'],
+      ...(change ? ([['diff', 'Cambios']] as [FileView['kind'], string][]) : []),
+      ...(isEnv ? ([['env', 'Variables']] as [FileView['kind'], string][]) : []),
+    ]
+    const tab = (kind: FileView['kind'], text: string) =>
       current.kind === kind ? (
-        <Text key={`tab-on:${kind}`} color="claude" bold underline>
-          {text}
+        <Text key={`tab-on:${kind}`} color={INK.text} backgroundColor={INK.tabOn}>
+          {` ${text} `}
         </Text>
       ) : (
-        <Button key={`to-${kind}`} label={text} plain dimColor onPress={() => go($, { kind, path: file.path })} />
+        <Button key={`to-${kind}`} label={` ${text} `} plain dimColor onPress={() => go($, { kind, path: file.path })} />
       )
+    const state =
+      current.kind !== 'edit'
+        ? message
+        : isDirty
+          ? isAutosave
+            ? 'guardando…'
+            : '● sin guardar'
+          : message !== ''
+            ? `✓ ${message}`
+            : ''
 
     const header = (
       <Box flexDirection="column" marginBottom={1}>
-        <Text wrap="truncate-end">
-          <Text color="claude">⎇ {snap.branch || 'worktree'}</Text>
-          <Text color="subtle"> · {tilde(snap.root)}</Text>
-        </Text>
-        <Text wrap="truncate-middle">
-          <Text bold>{file.path}</Text>
-          {change && <Text color={tone(change.code)}> {describe(change.code)}</Text>}
-          {change?.added !== undefined && change.added > 0 && <Text color="success"> +{change.added}</Text>}
-          {change?.removed !== undefined && change.removed > 0 && <Text color="error"> -{change.removed}</Text>}
-        </Text>
-        <Box gap={2}>
-          {tab('diff', 'Diff')}
-          {tab('edit', 'Editar')}
-          {isEnvFile(baseName(file.path)) && tab('env', 'Variables')}
-          <Button key="external" label="Abrir fuera ↗" plain dimColor onPress={() => openExternal($, editor, file.path)} />
-          <Button key="close" label="✕" plain dimColor role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
+        <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
+          <Box flexShrink={1}>
+            <Button key="to-files" label="‹ " plain dimColor onPress={() => openList($)} />
+            <Text wrap="truncate-middle">
+              {segments.slice(0, -1).map(part => (
+                <Text color={INK.dim}>{part} › </Text>
+              ))}
+              <Text color={INK.text}>{segments[segments.length - 1]}</Text>
+              {isDirty && <Text color={INK.text}> ●</Text>}
+              {heading !== undefined && <Text color={INK.dim}> › {heading}</Text>}
+            </Text>
+          </Box>
+          <Box flexShrink={0} columnGap={1}>
+            {views.map(([kind, text]) => tab(kind, text))}
+            <Button key="external" label=" ↗ " plain dimColor onPress={() => openExternal($, editor, file.path)} />
+            {close}
+          </Box>
         </Box>
-        {message !== '' && (
-          <Text color={message.startsWith('No se pudo') ? 'error' : 'success'}>{message}</Text>
-        )}
+        <Text wrap="truncate-end">
+          <Text color={INK.dim}>⎇ {snap.branch || 'worktree'}</Text>
+          {change && <Text color={INK.dim}>{`  ·  ${describe(change.code)}`}</Text>}
+          {change?.added !== undefined && change.added > 0 && <Text color={INK.added}> +{change.added}</Text>}
+          {change?.removed !== undefined && change.removed > 0 && <Text color={INK.deleted}> −{change.removed}</Text>}
+          {current.kind === 'code' && lines.length > bodyRows - HEADER_ROWS && (
+            <Text color={INK.dim}>{`  ·  ${first + 1}–${Math.min(lines.length, first + bodyRows - HEADER_ROWS)} de ${lines.length}`}</Text>
+          )}
+          {state !== '' && (
+            <Text color={state.startsWith('No se pudo') ? INK.deleted : state.startsWith('●') ? INK.strong : INK.added}>{`  ·  ${state}`}</Text>
+          )}
+        </Text>
       </Box>
     )
 
@@ -367,7 +572,7 @@ export const register: Register = (on, options) => {
         <>
           {header}
           {file.diff === '' ? (
-            <Text color="subtle">Sin diff que mostrar (archivo binario, muy grande o sin cambios).</Text>
+            <Text color={INK.dim}>Sin diff que mostrar (archivo binario, muy grande o sin cambios).</Text>
           ) : (
             <Code format="diff" source={file.diff} path={file.path} />
           )}
@@ -375,69 +580,103 @@ export const register: Register = (on, options) => {
       )
     }
 
-    if (current.kind === 'edit') {
-      const lines = file.text.split('\n')
-      // A final newline is no line of its own to edit.
-      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
-      if (Input === undefined || lines.length > MAX_EDIT_LINES) {
-        return frame(
-          <>
-            {header}
-            <Text color="subtle">
-              {Input === undefined
-                ? 'Esta superficie no tiene campos de texto; usa "Abrir fuera".'
-                : `Archivo de ${lines.length} líneas: aquí se muestra sin editar; usa "Abrir fuera".`}
-            </Text>
-            <Code source={file.text} path={file.path} startLine={1} />
-          </>,
-        )
-      }
-      const editing = await read($, line)
-      const width = String(lines.length).length
-      const number = (index: number) => `${String(index + 1).padStart(width)} `
+    if (current.kind === 'preview') {
       return frame(
         <>
           {header}
-          <Text color="subtle">Clic en una línea para editarla · Enter guarda</Text>
-          {lines.map((text, index) =>
-            editing === index ? (
-              <Box key={`editing:${index}`} flexDirection="column" marginY={1}>
-                <Input
-                  key={`line:${index}`}
-                  label={number(index)}
-                  value={text}
-                  autoFocus
-                  submitLabel="guardar"
-                  onSubmit={(value: string) => editLines($, file.path, all => all.splice(index, 1, ...value.split('\n')))}
-                />
-                <Box gap={2}>
-                  <Button key="cancel-line" label="Cancelar" plain dimColor onPress={() => update($, line, () => null)} />
-                  <Button key="delete-line" label="Borrar línea" plain dimColor onPress={() => editLines($, file.path, all => all.splice(index, 1))} />
+          <Markdown text={file.text} />
+        </>,
+      )
+    }
+
+    // A real field over the whole file: typing, arrows, newlines; saved as it goes.
+    if (current.kind === 'edit') {
+      if (Client === undefined || file.text.length > MAX_EDIT_CHARS) {
+        return frame(
+          <>
+            {header}
+            <Text color={INK.dim}>
+              {Client === undefined
+                ? 'Esta superficie no dibuja el editor; usa ↗ para editarlo fuera.'
+                : 'Archivo demasiado grande para editarlo aquí; usa ↗ para editarlo fuera.'}
+            </Text>
+          </>,
+        )
+      }
+      const props: EditorProps = {
+        path: file.path,
+        text: file.text,
+        version: await read($, version),
+        marks: [...markLines(file.diff).entries()],
+        wheel: await read($, wheel),
+        autosave: isAutosave,
+      }
+      return frame(
+        <>
+          {header}
+          <Client
+            key="editor"
+            module="./editor.tsx"
+            props={props}
+            width="100%"
+            height={Math.max(6, bodyRows - HEADER_ROWS - 1)}
+          />
+          <Box flexDirection="row" columnGap={2}>
+            <Button
+              key="autosave"
+              label={isAutosave ? '◉ Autoguardado' : '○ Autoguardado'}
+              plain
+              dimColor={!isAutosave}
+              onPress={async () => {
+                await update($, autosave, isOn => !isOn)
+                if (!isAutosave) await flush($)
+              }}
+            />
+            {!isAutosave && <Button key="save" label="Guardar" plain onPress={() => flush($)} />}
+            <Text color={INK.dim}>Clic en el texto para escribir · Esc devuelve el teclado al prompt</Text>
+          </Box>
+        </>,
+      )
+    }
+
+    if (current.kind === 'code') {
+      const marks = markLines(file.diff)
+      const room = Math.max(1, bodyRows - HEADER_ROWS)
+      const shownLines = lines.slice(first, first + room)
+      // Highlighting reads from the top, so a fence or comment opened above holds.
+      const painted = highlight(lines.slice(0, first + room), file.path).slice(first)
+      const width = String(lines.length).length
+      // The columns left for the code: the frame's padding and the gutter taken.
+      const columns = Math.max(10, e.props.bodyColumns - 2 - (width + 3))
+      return frame(
+        <>
+          {header}
+          {shownLines.map((text, offset) => {
+            const index = first + offset
+            const mark = marks.get(index + 1)
+            return (
+              <Box key={`row:${index}`} flexDirection="row" hover={{ backgroundColor: INK.lineHover }}>
+                <Box flexShrink={0}>
+                  <Text color={INK.gutter}>
+                    {String(index + 1).padStart(width)}
+                    <Text color={mark ? INK[mark] : INK.gutter}>{mark === 'deleted' ? ' ▸ ' : mark ? ' ▎ ' : '   '}</Text>
+                  </Text>
+                </Box>
+                <Box flexGrow={1} flexShrink={1} overflow="hidden">
+                  <Button key={`edit-line:${index}`} plain onPress={() => go($, { kind: 'edit', path: file.path })}>
+                    <Text color={INK.text} wrap="truncate-end">
+                      {clip(painted[offset] ?? [], columns).map(span => (
+                        <Text color={span.color} bold={span.bold} italic={span.italic}>
+                          {span.text}
+                        </Text>
+                      ))}
+                      {text === '' ? ' ' : ''}
+                    </Text>
+                  </Button>
                 </Box>
               </Box>
-            ) : (
-              <Box key={`row:${index}`} hover={{ backgroundColor: 'promptBorder' }}>
-                <Button key={`edit-line:${index}`} plain onPress={() => update($, line, () => index)}>
-                  <Text color="subtle">{number(index)}</Text>
-                  <Text>{text === '' ? ' ' : text}</Text>
-                </Button>
-              </Box>
-            ),
-          )}
-          <Box marginTop={1}>
-            <Input
-              key="append-line"
-              label="+ "
-              placeholder="Agregar una línea al final"
-              submitLabel="agregar"
-              onSubmit={(value: string) =>
-                editLines($, file.path, all => {
-                  const end = all.length > 1 && all[all.length - 1] === '' ? all.length - 1 : all.length
-                  all.splice(end, 0, ...value.split('\n'))
-                })
-              }
-            />
-          </Box>
+            )
+          })}
         </>,
       )
     }
@@ -458,7 +697,7 @@ export const register: Register = (on, options) => {
           plain
           onPress={() => update($, reveal, isOn => !isOn)}
         />
-        {vars.length === 0 && <Text color="subtle">No hay variables todavía.</Text>}
+        {vars.length === 0 && <Text color={INK.dim}>No hay variables todavía.</Text>}
         {vars.map(one =>
           isRevealed && Input !== undefined ? (
             <Box key={`row:${one.key}`}>
@@ -473,8 +712,8 @@ export const register: Register = (on, options) => {
             </Box>
           ) : (
             <Text key={`masked:${one.key}`}>
-              <Text color="suggestion">{one.key}</Text>
-              <Text color="subtle">={one.value === '' ? '(vacío)' : '••••••'}</Text>
+              <Text color={INK.keyword}>{one.key}</Text>
+              <Text color={INK.dim}>={one.value === '' ? '(vacío)' : '••••••'}</Text>
             </Text>
           ),
         )}

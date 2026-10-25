@@ -91,17 +91,37 @@ test('lists changed files above the prompt and opens one only when picked', asyn
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /feature-x/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: / modificado$/ })).toBeDefined()
-  expect(await ui.find({ key: 'to-edit' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /·\s+modificado$/ })).toBeDefined()
+  expect(await ui.find({ key: 'to-diff' })).toBeDefined()
 
-  // The editor: a line is a button; pressed, it becomes a field.
+  // It opens on its colored source; Editar is the editor, a surface module:
+  // the keys it takes change its buffer, ctrl+s posts a save.
+  expect(await ui.find({ key: 'edit-line:0' })).toBeDefined()
   await ui.press({ key: 'to-edit' })
-  await ui.press({ key: 'edit-line:1' })
-  await ui.input({ key: 'line:1', text: 'const b = 3' })
+  await ui.resize({ columns: 60, rows: 20, in: 'editor' })
+  await ui.key({ key: 'down', in: 'editor' })
+  await ui.key({ key: 'end', in: 'editor' })
+  await ui.key({ key: 'backspace', in: 'editor' })
+  await ui.key({ key: '3', in: 'editor' })
+  await ui.key({ key: 's', ctrl: true, in: 'editor' })
   expect(written['/repo/src/app.ts']).toBe('const a = 1\nconst b = 3\n')
-  await ui.input({ key: 'append-line', text: 'const c = 4' })
-  expect(written['/repo/src/app.ts']).toBe('const a = 1\nconst b = 3\nconst c = 4\n')
   await ui.unmount()
+
+  // The summary opens every changed file as a list.
+  const band3 = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band3.press({ key: 'all-files' })
+  await band3.unmount()
+  const list = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await list.find({ key: 'file:src/app.ts' })).toBeDefined()
+  await list.press({ key: 'file:notes.md' })
+  await list.unmount()
+
+  // A markdown file offers its preview beside its source.
+  const md = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await md.find({ key: 'edit-line:0' })).toBeDefined()
+  await md.press({ key: 'to-preview' })
+  expect(await md.find({ key: 'edit-line:0' })).toBeUndefined()
+  await md.unmount()
 
   // A .env with no change opens on its variables.
   const band2 = await $.ui.mount({ ...BAND, surface: 'terminal' })

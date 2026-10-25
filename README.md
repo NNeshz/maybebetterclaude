@@ -3,17 +3,18 @@
 Un mod de Claude Code que pone sobre el prompt los archivos que cambiaron en el worktree de la sesión. Al hacer clic en uno se abre un panel con su diff y un editor.
 
 ```text
-[README.md] +1 -1 [PRUEBA.md] +4 [.env] click para ver o editar     ← clic: abre el panel con ese archivo
+⎇ 23 cambios +412 -88 │ [README.md] +2 [register.tsx] +210 -60 [pane.test.tsx] +15 -5 +20 más
 ──────────────────────────────────────────────────────────────────
 ❯
 ```
 
-- **Fila sobre el prompt**: un `[archivo]` por cada archivo cambiado (`git status`), con sus líneas agregadas y quitadas. Se ilumina al pasar el puntero y queda marcado el que está abierto.
-- **El panel no se abre solo**: solo aparece al elegir un archivo (o con `/worktree`). Se cierra con **✕**.
-- **Diff**: los cambios del archivo con colores.
-- **Editar**: el archivo con números de línea. Haz clic en una línea para editarla y pulsa Enter para guardar. También puedes borrar la línea o agregar una al final. En archivos de más de 800 líneas solo se puede ver; para editarlos usa *Abrir fuera*.
+- **Fila sobre el prompt**: siempre ocupa una sola línea. Empieza con un resumen (`⎇ 23 cambios +412 -88`) que abre la lista de todos los archivos cambiados, sigue con un `[archivo]` por cada uno que quepa y termina con `+N más`.
+- **Lista de cambios**: como el panel de Source Control de Cursor: nombre, carpeta en gris, líneas agregadas y quitadas, y la letra de estado (M, U, A, D). Clic en uno para abrirlo; `‹` vuelve a la lista. `/worktree` la abre. El panel se cierra con **✕**.
+- **Código**: el archivo con ruta de navegación (`carpeta › archivo › # sección`), números de línea, resaltado de sintaxis (Markdown y código) y una marca en el margen en cada línea agregada (verde), modificada (azul) o borrada (rojo). Se desplaza con la rueda; solo dibuja lo que se ve, así que sirve para archivos de cualquier tamaño.
+- **Editar**: un editor como el de Warp, dentro del panel: números de línea, colores, marcas de cambios, cursor y barra de estado (`Ln 12, Col 4 · ✓ guardado`). Haz clic en el texto para escribir; flechas, Inicio/Fin, Re Pág/Av Pág, Tab, Enter conserva la sangría. Con *Autoguardado* encendido se guarda solo al dejar de escribir; `ctrl+s` guarda al momento; Esc devuelve el teclado al prompt.
+- **Pestañas**: *Preview* y *Markdown* en archivos `.md`, *Código* en el resto, *Editar*, y *Cambios* con el diff a colores.
 - **Variables de entorno**: también aparecen `.env`, `.env.*` y `.dev.vars` de la raíz del repo, aunque estén en `.gitignore`. Los valores se ven ocultos hasta pulsar *Mostrar valores*, y se pueden editar, borrar o agregar uno por uno.
-- **Abrir fuera ↗**: abre el archivo con tu editor externo (configurable).
+- **↗**: abre el archivo con tu editor externo (configurable).
 - El panel tiene un fondo más oscuro que la terminal (configurable). Se puede usar con teclado o con mouse.
 
 ## Instalación

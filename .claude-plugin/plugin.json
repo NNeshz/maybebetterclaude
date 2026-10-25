@@ -1,7 +1,7 @@
 {
   "name": "worktree-diff",
-  "version": "0.2.0",
-  "description": "Los archivos cambiados del worktree sobre el prompt; al elegir uno, su diff y un editor en un panel (incluido .env)",
+  "version": "0.3.0",
+  "description": "Los archivos cambiados del worktree sobre el prompt; al elegir uno, un editor estilo Cursor con su código, su diff y sus variables (.env) en un panel",
   "types": "./types/index.d.ts",
   "userConfig": {
     "editor": {
