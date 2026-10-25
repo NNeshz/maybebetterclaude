@@ -14,12 +14,38 @@ const PANE = {
   },
 } as const
 
-test('lists changes and edits a .env value', async ($, on) => {
-  const written: Record<string, string> = {}
-  let envText = 'API_URL=http://localhost\nSECRET=abc\n'
+const BAND = {
+  plugin: 'worktree-diff',
+  component: 'AbovePrompt',
+  props: {
+    hasSurvey: false,
+    isWorking: false,
+    maxRows: 10,
+    bodyColumns: 100,
+    scroll: { offset: 0, bodyRows: 10 },
+    view: {},
+  },
+} as const
 
+test('lists changed files above the prompt and opens one only when picked', async ($, on) => {
+  const written: Record<string, string> = {}
+  const opens: string[] = []
+  const files: Record<string, string> = {
+    '/repo/src/app.ts': 'const a = 1\nconst b = 2\n',
+    '/repo/notes.md': 'uno\ndos\n',
+    '/repo/.env': 'API_URL=http://localhost\nSECRET=abc\n',
+  }
+
+  // The engine's own band, beneath the plugin's chips.
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="engine" />
+  })
   on('command.register', () => ({ value: { command: 'worktree' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    opens.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/repo' }))
   on('process.run', (_, e) => {
@@ -29,11 +55,13 @@ test('lists changes and edits a .env value', async ($, on) => {
       : args.includes('branch')
         ? 'feature-x\n'
         : args.includes('numstat')
-          ? '3\t1\tsrc/app.ts\n'
-        : args.includes('status')
-          ? ' M src/app.ts\0?? notes.md\0'
-          : ''
-    return { value: { exitCode: 0, stdout, stderr: '' } }
+          ? '1\t1\tsrc/app.ts\n'
+          : args.includes('status')
+            ? ' M src/app.ts\0?? notes.md\0'
+            : args.includes('diff')
+              ? '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,2 +1,2 @@\n-const a = 0\n+const a = 1\n const b = 2\n'
+              : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.list', () => ({
     value: [
@@ -41,35 +69,50 @@ test('lists changes and edits a .env value', async ($, on) => {
       { name: 'src', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
     ],
   }))
-  on('fs.read', () => ({ value: envText }))
+  on('fs.read', (_, e) => ({ value: files[e.path] ?? '' }))
   on('fs.write', (_, e) => {
     written[e.path] = e.text
-    envText = e.text
+    files[e.path] = e.text
     return { value: undefined }
   })
 
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'worktree' })
+  // Nothing opens by itself.
+  expect(opens).toEqual([])
 
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /feature-x/ }))).toBeDefined()
-    expect(await ui.find({ key: 'file:src/app.ts' })).toBeDefined()
-    expect(await ui.find({ key: 'file:notes.md' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ \+3$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ -1$/ })).toBeDefined()
-    // notes.md is untracked: its lines are counted from the file (fs.read's two lines).
-    expect(await ui.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()
-    await ui.unmount()
-  }
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'chip:src/app.ts' })).toBeDefined()
+  expect(await band.find({ key: 'chip:notes.md' })).toBeDefined()
+  expect(await band.find({ key: 'chip:.env' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()
+  await band.press({ key: 'chip:src/app.ts' })
+  expect(opens).toEqual(['worktree-diff'])
+  await band.unmount()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'env:.env' })
-  expect(await ui.find({ type: 'Text', text: /SECRET=••••••/ })).toBeDefined()
-  await ui.press({ key: 'reveal' })
-  await ui.input({ key: 'var:SECRET', text: 'xyz' })
-  expect(written['/repo/.env']).toBe('API_URL=http://localhost\nSECRET=xyz\n')
-  await ui.input({ key: 'new-var', text: 'DEBUG=1' })
-  expect(written['/repo/.env']).toBe('API_URL=http://localhost\nSECRET=xyz\nDEBUG=1\n')
+  expect(await ui.find({ type: 'Text', text: /feature-x/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: / modificado$/ })).toBeDefined()
+  expect(await ui.find({ key: 'to-edit' })).toBeDefined()
+
+  // The editor: a line is a button; pressed, it becomes a field.
+  await ui.press({ key: 'to-edit' })
+  await ui.press({ key: 'edit-line:1' })
+  await ui.input({ key: 'line:1', text: 'const b = 3' })
+  expect(written['/repo/src/app.ts']).toBe('const a = 1\nconst b = 3\n')
+  await ui.input({ key: 'append-line', text: 'const c = 4' })
+  expect(written['/repo/src/app.ts']).toBe('const a = 1\nconst b = 3\nconst c = 4\n')
   await ui.unmount()
+
+  // A .env with no change opens on its variables.
+  const band2 = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band2.press({ key: 'chip:.env' })
+  await band2.unmount()
+  const env = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await env.find({ type: 'Text', text: /SECRET=••••••/ })).toBeDefined()
+  await env.press({ key: 'reveal' })
+  await env.input({ key: 'var:SECRET', text: 'xyz' })
+  expect(written['/repo/.env']).toBe('API_URL=http://localhost\nSECRET=xyz\n')
+  await env.input({ key: 'new-var', text: 'DEBUG=1' })
+  expect(written['/repo/.env']).toBe('API_URL=http://localhost\nSECRET=xyz\nDEBUG=1\n')
+  await env.unmount()
 })

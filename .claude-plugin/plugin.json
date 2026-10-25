@@ -1,7 +1,7 @@
 {
   "name": "worktree-diff",
-  "version": "0.1.0",
-  "description": "Panel con los cambios del worktree de la sesión, su diff y un editor integrado (incluido .env)",
+  "version": "0.2.0",
+  "description": "Los archivos cambiados del worktree sobre el prompt; al elegir uno, su diff y un editor en un panel (incluido .env)",
   "types": "./types/index.d.ts",
   "userConfig": {
     "editor": {
@@ -9,6 +9,12 @@
       "title": "Editor externo",
       "description": "Comando que abre un archivo (se le agrega la ruta). Ej: open, open -a Warp, code -g, zed, cursor",
       "default": "open"
+    },
+    "background": {
+      "type": "string",
+      "title": "Fondo del panel",
+      "description": "Color de fondo del panel (hex o nombre). Vacío usa el de la terminal",
+      "default": "#0a0a0a"
     }
   }
 }

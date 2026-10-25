@@ -1,14 +1,20 @@
 # worktree-diff
 
-Un mod de Claude Code que abre un panel al lado del chat con los cambios del worktree de la sesión.
+Un mod de Claude Code que pone sobre el prompt los archivos que cambiaron en el worktree de la sesión. Al hacer clic en uno se abre un panel con su diff y un editor.
 
-- Lista los archivos cambiados (`git status`) con las líneas agregadas y quitadas de cada uno, y el total.
-- Al hacer clic en un archivo muestra su diff con colores.
-- **Editar aquí**: un editor integrado en el panel para cambiar el archivo sin salir de Claude Code.
-- **Variables de entorno**: detecta `.env`, `.env.*` y `.dev.vars` en la raíz del repo (aunque estén en `.gitignore`). Los valores salen ocultos hasta que pulsas *Mostrar valores*; entonces puedes editar, borrar o agregar variables una por una.
+```text
+[README.md] +1 -1 [PRUEBA.md] +4 [.env] click para ver o editar     ← clic: abre el panel con ese archivo
+──────────────────────────────────────────────────────────────────
+❯
+```
+
+- **Fila sobre el prompt**: un `[archivo]` por cada archivo cambiado (`git status`), con sus líneas agregadas y quitadas. Se ilumina al pasar el puntero y queda marcado el que está abierto.
+- **El panel no se abre solo**: solo aparece al elegir un archivo (o con `/worktree`). Se cierra con **✕**.
+- **Diff**: los cambios del archivo con colores.
+- **Editar**: el archivo con números de línea. Haz clic en una línea para editarla y pulsa Enter para guardar. También puedes borrar la línea o agregar una al final. En archivos de más de 800 líneas solo se puede ver; para editarlos usa *Abrir fuera*.
+- **Variables de entorno**: también aparecen `.env`, `.env.*` y `.dev.vars` de la raíz del repo, aunque estén en `.gitignore`. Los valores se ven ocultos hasta pulsar *Mostrar valores*, y se pueden editar, borrar o agregar uno por uno.
 - **Abrir fuera ↗**: abre el archivo con tu editor externo (configurable).
-- Si la sesión no está dentro de un repositorio git, ofrece elegir uno de las subcarpetas.
-- Usa los colores del tema de Claude Code (`/theme`) y se puede usar con teclado o con mouse.
+- El panel tiene un fondo más oscuro que la terminal (configurable). Se puede usar con teclado o con mouse.
 
 ## Instalación
 
@@ -30,13 +36,16 @@ En la app de escritorio: haz clic en + junto a la caja del prompt, luego Plugins
 
 ## Uso
 
-- El panel se abre solo al iniciar la sesión si la terminal tiene al menos 144 columnas.
-- `/worktree` lo abre (o lo reabre) en cualquier momento.
-- Los cambios se refrescan solos después de cada `Edit`, `Write` o `Bash` de Claude, o con **↻ Refrescar**.
+- La fila de archivos aparece sobre el prompt cuando el worktree tiene cambios. Para hacer clic en ella hace falta el modo pantalla completa (`"tui": "fullscreen"`); sin mouse, ctrl+x tab lleva el foco a la fila.
+- `/worktree` abre el primer archivo cambiado.
+- Los cambios se refrescan solos después de cada `Edit`, `Write` o `Bash` de Claude.
 
 ## Configuración
 
-Opción **Editor externo** (en `/config`): el comando que abre un archivo; se le agrega la ruta al final. Por defecto `open` (la app predeterminada de macOS). Ejemplos: `open -a Warp`, `code -g`, `zed`, `cursor`.
+En `/config`:
+
+- **Editor externo**: el comando que abre un archivo, al que se le agrega la ruta al final. Por defecto es `open` (la app predeterminada de macOS). Ejemplos: `open -a Warp`, `code -g`, `zed`, `cursor`.
+- **Fondo del panel**: el color de fondo del panel. Por defecto es `#0a0a0a`. Si lo dejas vacío, usa el fondo de la terminal (útil con un tema claro).
 
 ## Desarrollo
 
