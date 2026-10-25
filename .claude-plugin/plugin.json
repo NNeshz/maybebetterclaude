@@ -1,0 +1,14 @@
+{
+  "name": "worktree-diff",
+  "version": "0.1.0",
+  "description": "Panel con los cambios del worktree de la sesión, su diff y un editor integrado (incluido .env)",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "editor": {
+      "type": "string",
+      "title": "Editor externo",
+      "description": "Comando que abre un archivo (se le agrega la ruta). Ej: open, open -a Warp, code -g, zed, cursor",
+      "default": "open"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "maybebetterclaude",
+  "owner": { "name": "NNeshz" },
+  "plugins": [{ "name": "worktree-diff", "source": "./" }]
+}
