@@ -1,7 +1,7 @@
 {
   "name": "worktree-diff",
-  "version": "0.3.0",
-  "description": "Los archivos cambiados del worktree sobre el prompt; al elegir uno, un editor estilo Cursor con su código, su diff y sus variables (.env) en un panel",
+  "version": "0.4.0",
+  "description": "Los archivos cambiados del worktree sobre el prompt, los de los otros worktrees en la lista; al elegir uno, un editor estilo Cursor con su código, su diff y sus variables (.env) en un panel",
   "types": "./types/index.d.ts",
   "userConfig": {
     "editor": {
@@ -15,6 +15,12 @@
       "title": "Fondo del panel",
       "description": "Color de fondo del panel (hex o nombre). Vacío usa el de la terminal",
       "default": "#0a0a0a"
+    },
+    "editEnv": {
+      "type": "boolean",
+      "title": "Editar variables de entorno",
+      "description": "Permite editar, borrar y agregar variables en .env, .env.* y .dev.vars; cada guardado pide confirmación. Apagado, solo se ven",
+      "default": false
     }
   }
 }
